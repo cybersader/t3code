@@ -4,7 +4,9 @@ import android.text.InputType
 import android.view.InputDevice
 import android.view.KeyCharacterMap
 import android.view.KeyEvent
+import android.view.inputmethod.EditorInfo
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
@@ -85,6 +87,27 @@ class ComposerSubmitTest {
 
     assertEquals(emptyList<Boolean>(), sends)
     assertEquals("\n\n", editor.text.toString())
+  }
+
+  @Test
+  fun onScreenKeyboardReturnSendsWhenSoftReturnSends() {
+    editor.softReturnSends = true
+    val info = EditorInfo()
+    val connection = editor.onCreateInputConnection(info)!!
+
+    assertEquals(EditorInfo.IME_ACTION_SEND, info.imeOptions and EditorInfo.IME_MASK_ACTION)
+    assertEquals(0, info.imeOptions and EditorInfo.IME_FLAG_NO_ENTER_ACTION)
+    // Gboard runs the Send action; voice keyboards such as FUTO commit a bare newline.
+    assertTrue(connection.performEditorAction(EditorInfo.IME_ACTION_SEND))
+    assertTrue(connection.commitText("\n", 1))
+    pressReturn(
+      device = keyboard(KeyCharacterMap.VIRTUAL_KEYBOARD),
+      flags = KeyEvent.FLAG_SOFT_KEYBOARD
+    )
+    assertTrue(connection.commitText("word", 1))
+
+    assertEquals(listOf(false, false, false), sends)
+    assertEquals("word", editor.text.toString())
   }
 
   @Test

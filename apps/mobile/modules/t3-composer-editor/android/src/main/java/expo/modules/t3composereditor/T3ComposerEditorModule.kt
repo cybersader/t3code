@@ -112,6 +112,9 @@ class T3ComposerEditorModule : Module() {
       Prop("enterBehavior") { view: T3ComposerEditorView, behavior: String ->
         view.setEnterBehavior(behavior)
       }
+      Prop("softReturnSends") { view: T3ComposerEditorView, sends: Boolean ->
+        view.setSoftReturnSends(sends)
+      }
       Prop("submitEnabled") { view: T3ComposerEditorView, enabled: Boolean ->
         view.setSubmitEnabled(enabled)
       }

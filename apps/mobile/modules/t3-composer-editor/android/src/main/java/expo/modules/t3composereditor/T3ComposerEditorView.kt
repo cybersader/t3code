@@ -336,6 +336,10 @@ class T3ComposerEditorView(context: Context, appContext: AppContext) : ExpoView(
     editor.returnSends = behavior != "newline"
   }
 
+  fun setSoftReturnSends(sends: Boolean) {
+    editor.softReturnSends = sends
+  }
+
   fun setSubmitEnabled(enabled: Boolean) {
     editor.submitEnabled = enabled
   }
@@ -634,6 +638,13 @@ internal class SelectionAwareEditText(
   var submitListener: ((Boolean) -> Unit)? = null
   var submitEnabled = false
   var returnSends = true
+  var softReturnSends = false
+    set(value) {
+      if (field == value) return
+      field = value
+      (context.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager)
+        ?.restartInput(this)
+    }
   var textPasteThresholdBytes = 0
   var maxInputChars = Int.MAX_VALUE
   var clipboardFragment = ""
@@ -698,7 +709,10 @@ internal class SelectionAwareEditText(
   // No composing-text guard: some IMEs keep a composing region over the last word while hardware typing.
   private fun returnSubmission(keyCode: Int, event: KeyEvent): Boolean? {
     val isReturn = keyCode == KeyEvent.KEYCODE_ENTER || keyCode == KeyEvent.KEYCODE_NUMPAD_ENTER
-    if (!isReturn || !canSubmit() || !isFromPhysicalKeyboard(event)) return null
+    if (!isReturn || !canSubmit()) return null
+    if (!isFromPhysicalKeyboard(event)) {
+      return if (softReturnSends && event.hasNoModifiers()) false else null
+    }
     return if (returnSends) {
       when {
         event.hasNoModifiers() -> false
@@ -747,8 +761,30 @@ internal class SelectionAwareEditText(
     else -> false
   }
 
+  // On-screen keyboards rarely send Return as a key event: Gboard runs the editor action and
+  // voice keyboards such as FUTO commit "\n". With softReturnSends both send instead.
+  override fun onEditorAction(actionCode: Int) {
+    if (softReturnSends && actionCode == EditorInfo.IME_ACTION_SEND) {
+      if (canSubmit()) submitListener?.invoke(false)
+      return
+    }
+    super.onEditorAction(actionCode)
+  }
+
+  private fun submitsSoftNewline(text: CharSequence?): Boolean {
+    if (!softReturnSends || text?.toString() != "\n") return false
+    if (canSubmit()) submitListener?.invoke(false)
+    return true
+  }
+
   override fun onCreateInputConnection(outAttrs: EditorInfo): InputConnection? {
     val connection = super.onCreateInputConnection(outAttrs) ?: return null
+    if (softReturnSends) {
+      // Multiline editors suppress the IME action; ask for a Send key instead of Return.
+      outAttrs.imeOptions =
+        (outAttrs.imeOptions and (EditorInfo.IME_MASK_ACTION or EditorInfo.IME_FLAG_NO_ENTER_ACTION).inv()) or
+        EditorInfo.IME_ACTION_SEND
+    }
     return object : InputConnectionWrapper(connection, false) {
       override fun deleteSurroundingText(
         beforeLength: Int,
@@ -775,7 +811,9 @@ internal class SelectionAwareEditText(
       }
 
       private fun commitUnlessPasted(text: CharSequence?, commit: () -> Boolean): Boolean =
-        if (interceptKeyboardPaste(text)) {
+        if (submitsSoftNewline(text)) {
+          true
+        } else if (interceptKeyboardPaste(text)) {
           // The keyboard now treats its composing text as replaced; a span left behind would
           // let its next word overwrite text the paste did not remove.
           finishComposingText()

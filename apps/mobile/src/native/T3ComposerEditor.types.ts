@@ -85,8 +85,10 @@ export interface ComposerEditorProps {
     readonly width: number;
     readonly height: number;
   }) => void;
-  /** Hardware-keyboard Return behavior. Soft keyboards always insert a newline. */
+  /** Hardware-keyboard Return behavior. Soft keyboards insert a newline unless softReturnSends. */
   readonly enterBehavior?: ComposerEnterBehavior;
+  /** Android: Return on an on-screen keyboard sends, and can no longer insert a newline. */
+  readonly softReturnSends?: boolean;
   readonly submitTitle?: string;
   readonly alternateSubmitTitle?: string;
   /** Command chords (Ctrl on Android) reverse the configured follow-up behavior. */

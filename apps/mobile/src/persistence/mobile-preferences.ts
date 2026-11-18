@@ -161,6 +161,8 @@ export interface Preferences {
   readonly dismissedDatabaseStorageNotices?: readonly string[];
   /** Hardware-keyboard Return behavior in the composer. */
   readonly composerEnterBehavior?: ComposerEnterBehavior;
+  /** Android: on-screen keyboard Return sends instead of inserting a newline. */
+  readonly composerSoftReturnSends?: boolean;
   readonly followUpBehavior?: FollowUpBehavior;
   /** The client `language` setting: a locale code or "system". Unset means English. */
   readonly language?: string;
@@ -252,6 +254,7 @@ function sanitizePreferences(parsed: Preferences): Preferences {
     collapsedProjectGroups?: readonly string[];
     dismissedDatabaseStorageNotices?: readonly string[];
     composerEnterBehavior?: ComposerEnterBehavior;
+    composerSoftReturnSends?: boolean;
     followUpBehavior?: FollowUpBehavior;
     language?: string;
     microphones?: ReadonlyArray<MicrophoneEntry>;
@@ -364,6 +367,9 @@ function sanitizePreferences(parsed: Preferences): Preferences {
   }
   if (parsed.composerEnterBehavior === "send" || parsed.composerEnterBehavior === "newline") {
     preferences.composerEnterBehavior = parsed.composerEnterBehavior;
+  }
+  if (typeof parsed.composerSoftReturnSends === "boolean") {
+    preferences.composerSoftReturnSends = parsed.composerSoftReturnSends;
   }
   if (parsed.followUpBehavior === "queue" || parsed.followUpBehavior === "steer") {
     preferences.followUpBehavior = parsed.followUpBehavior;

@@ -15,6 +15,7 @@ import { useAtomCommand } from "../../state/use-atom-command";
 import { ListChoiceRow as SettingsChoiceRow } from "../../components/ui/ListChoiceRow";
 import { SettingsScreen } from "./components/SettingsScreen";
 import { SettingsSection } from "./components/SettingsSection";
+import { SettingsSwitchRow } from "./components/SettingsSwitchRow";
 
 const SEND_MODIFIER = Platform.OS === "android" ? "Ctrl" : "Command";
 
@@ -79,6 +80,24 @@ export function SettingsKeyboardRouteScreen() {
         <Text className="px-2 text-sm text-foreground-muted">
           <T>Applies to the composer when a hardware keyboard is connected.</T>
         </Text>
+        {Platform.OS === "android" ? (
+          <SettingsSection title={gt("On-screen keyboard")}>
+            <SettingsSwitchRow
+              label={gt("Return sends the message")}
+              subtitle={gt(
+                "For keyboards without Shift-Return, such as voice keyboards. Return can no longer start a new line.",
+              )}
+              value={
+                AsyncResult.isSuccess(preferencesResult) &&
+                preferencesResult.value.composerSoftReturnSends === true
+              }
+              disabled={!preferencesReady}
+              onValueChange={(composerSoftReturnSends) => {
+                void savePreferences({ composerSoftReturnSends });
+              }}
+            />
+          </SettingsSection>
+        ) : null}
       </ScrollView>
     </SettingsScreen>
   );
