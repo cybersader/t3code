@@ -61,6 +61,72 @@ export function isModelSelectionProviderEnabled(
   return isUnconfiguredDefaultInstanceEnabled(selection.instanceId);
 }
 
+type ModelServingSettings = Pick<
+  ServerSettings,
+  "providerInstances" | "projectSettingsOverrides" | "providerModelPreferences"
+>;
+
+function declaresCustomModel(config: unknown, model: string): boolean {
+  if (config === null || typeof config !== "object") return false;
+  const value = (config as Record<string, unknown>).customModels;
+  return Array.isArray(value) && readCustomModelEntries(value).some((e) => e.slug === model);
+}
+
+/**
+ * Whether an instance runs a model. A model hidden on the instance is not served there, nor is a
+ * custom model another enabled instance of the same driver declares and this one does not.
+ */
+export function providerInstanceServesModel(
+  settings: ModelServingSettings,
+  projectId: ProjectId | null,
+  instanceId: ProviderInstanceId,
+  model: string,
+): boolean {
+  if (settings.providerModelPreferences?.[instanceId]?.hiddenModels.includes(model)) return false;
+  const own = Object.hasOwn(settings.providerInstances, instanceId)
+    ? settings.providerInstances[instanceId]
+    : undefined;
+  if (own === undefined || declaresCustomModel(own.config, model)) return true;
+  return !Object.entries(settings.providerInstances).some(
+    ([id, instance]) =>
+      id !== instanceId &&
+      instance.driver === own.driver &&
+      declaresCustomModel(instance.config, model) &&
+      resolveProjectProviderInstanceEnabled(settings, projectId, ProviderInstanceId.make(id)),
+  );
+}
+
+/**
+ * Moves a selection whose instance does not serve its model to an enabled instance of the same
+ * driver that claims the model (as a custom model or in its model order). Otherwise unchanged.
+ */
+export function resolveServingModelSelection(
+  settings: ModelServingSettings,
+  projectId: ProjectId | null,
+  selection: ModelSelection,
+): ModelSelection {
+  const { instanceId, model } = selection;
+  if (providerInstanceServesModel(settings, projectId, instanceId, model)) return selection;
+  const own = Object.hasOwn(settings.providerInstances, instanceId)
+    ? settings.providerInstances[instanceId]
+    : undefined;
+  if (own === undefined) return selection;
+  for (const [id, instance] of Object.entries(settings.providerInstances)) {
+    const candidate = ProviderInstanceId.make(id);
+    if (
+      candidate !== instanceId &&
+      instance.driver === own.driver &&
+      (declaresCustomModel(instance.config, model) ||
+        settings.providerModelPreferences?.[candidate]?.modelOrder.includes(model)) &&
+      resolveProjectProviderInstanceEnabled(settings, projectId, candidate) &&
+      providerInstanceServesModel(settings, projectId, candidate, model)
+    ) {
+      return { ...selection, instanceId: candidate };
+    }
+  }
+  return selection;
+}
+
 const TEXT_GENERATION_FALLBACK_DRIVERS = [
   "codex",
   "claudeAgent",

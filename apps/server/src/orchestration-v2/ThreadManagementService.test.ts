@@ -94,7 +94,8 @@ const layerReceiptsTest = CommandReceiptStore.layer.pipe(
 );
 
 const layerDispatchChokepointTest =
-  (settingsLayer: ReturnType<typeof ServerSettings.layerTest>) => (dispatched: Array<string>) =>
+  (settingsLayer: ReturnType<typeof ServerSettings.layerTest>) =>
+  (dispatched: Array<string>, sent: Array<unknown> = []) =>
     ThreadManagementService.layer.pipe(
       Layer.provide(Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({})),
       Layer.provide(
@@ -114,6 +115,7 @@ const layerDispatchChokepointTest =
           dispatch: (command) =>
             Effect.sync(() => {
               dispatched.push(command.type);
+              sent.push(command);
               return { sequence: 1, storedEvents: [] } as never;
             }),
         }),
@@ -303,6 +305,42 @@ it.effect.each([
         : "ThreadManagementWorktreeRestoreError",
     );
     expect(dispatched).toEqual(running ? ["message.dispatch"] : []);
+  }).pipe(Effect.provide(layerTest));
+});
+
+it.effect("the dispatch chokepoint sends a model to the enabled instance that runs it", () => {
+  const opus = ProviderInstanceId.make("claude_opus_lead");
+  const astra = ProviderInstanceId.make("claude_astra_lead");
+  const dispatched: Array<string> = [];
+  const sent: Array<unknown> = [];
+  const layerTest = layerDispatchChokepointTest(
+    ServerSettings.layerTest({
+      providerInstances: {
+        [opus]: { driver: "claudeAgent", enabled: true, config: { customModels: [] } },
+        [astra]: {
+          driver: "claudeAgent",
+          enabled: true,
+          config: { customModels: ["gpt-6.2-astra"] },
+        },
+      },
+    }),
+  )(dispatched, sent);
+
+  return Effect.gen(function* () {
+    const threads = yield* ThreadManagementService.ThreadManagementService;
+    yield* threads.dispatch({
+      type: "message.dispatch",
+      commandId: CommandId.make("command:thread-management:reroute"),
+      threadId: ThreadId.make("thread:thread-management:chokepoint"),
+      messageId: MessageId.make("message:thread-management:reroute"),
+      text: "Hello",
+      attachments: [],
+      modelSelection: { instanceId: opus, model: "gpt-6.2-astra" },
+      dispatchMode: { type: "queue_after_active" },
+      createdBy: "user",
+      creationSource: "mobile",
+    });
+    expect(sent).toMatchObject([{ modelSelection: { instanceId: astra, model: "gpt-6.2-astra" } }]);
   }).pipe(Effect.provide(layerTest));
 });
 

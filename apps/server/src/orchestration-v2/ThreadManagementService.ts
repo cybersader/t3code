@@ -46,6 +46,7 @@ import {
 import { delegatedTaskProgress } from "@t3tools/provider-core/server/subagentProjection";
 import { threadTranscriptHeader } from "@t3tools/shared/threadTranscript";
 import { AgentScope } from "@t3tools/shared/AgentScope";
+import { resolveServingModelSelection } from "@t3tools/shared/serverSettings";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
@@ -810,10 +811,59 @@ const make = Effect.gen(function* () {
     }
   };
 
+  // A client can pair a model with an instance that does not run it (each launcher may run one
+  // model); route the command to the enabled instance that does. Replays keep their payload.
+  const withServingModelSelection = Effect.fn("ThreadManagementService.withServingModelSelection")(
+    function* (command: OrchestrationV2ServerCommand) {
+      if (
+        command.type !== "thread.create" &&
+        command.type !== "thread.model-selection.set" &&
+        command.type !== "provider.switch" &&
+        command.type !== "message.dispatch" &&
+        command.type !== "delegated_task.request"
+      ) {
+        return command;
+      }
+      if (yield* hasReceipt(command.commandId)) return command;
+      const settings = yield* serverSettings.getSettings.pipe(Effect.orDie);
+      const target =
+        command.type === "thread.create"
+          ? { projectId: command.projectId, current: command.modelSelection }
+          : yield* orchestrator
+              .getThreadRecords(
+                command.type === "delegated_task.request"
+                  ? command.parentThreadId
+                  : command.threadId,
+                [],
+              )
+              .pipe(
+                Effect.map(({ thread }) => ({
+                  projectId: thread.projectId,
+                  current: thread.modelSelection,
+                })),
+              );
+      const requested =
+        command.type === "message.dispatch"
+          ? (command.modelSelection ?? target.current)
+          : command.modelSelection;
+      const modelSelection = resolveServingModelSelection(settings, target.projectId, requested);
+      if (modelSelection === requested) return command;
+      yield* Effect.logInfo("orchestration-v2.model-selection.rerouted", {
+        commandType: command.type,
+        model: modelSelection.model,
+        from: requested.instanceId,
+        to: modelSelection.instanceId,
+      });
+      return { ...command, modelSelection };
+    },
+  );
+
   const dispatch: ThreadManagementServiceShape["dispatch"] = (command) =>
     ensureCommandTranscripts(command).pipe(
-      Effect.andThen(assertDispatchTargetEnabled(command)),
-      Effect.andThen(orchestrator.dispatch(command)),
+      Effect.andThen(withServingModelSelection(command)),
+      Effect.flatMap((routed) =>
+        assertDispatchTargetEnabled(routed).pipe(Effect.andThen(orchestrator.dispatch(routed))),
+      ),
     );
 
   const getProjectThreadRecords: ThreadManagementServiceShape["getProjectThreadRecords"] = (

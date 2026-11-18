@@ -23,6 +23,8 @@ import {
   resolveModelPreferences,
   isModelSelectionProviderEnabled,
   parsePersistedServerObservabilitySettings,
+  providerInstanceServesModel,
+  resolveServingModelSelection,
   resolveReviewGuideModelSelection,
   resolveSourceControlWriterModelSelection,
   resolveSpeechPostProcessingModelSelection,
@@ -1093,5 +1095,79 @@ describe("resolveSpeechPostProcessingModelSelection", () => {
       applyServerSettingsPatch(pinned, { speechPostProcessingModelSelection: null })
         .speechPostProcessingModelSelection,
     ).toBeNull();
+  });
+});
+
+describe("resolveServingModelSelection", () => {
+  const claude = (customModels: ReadonlyArray<string>, enabled = true) => ({
+    driver: "claudeAgent",
+    enabled,
+    config: { customModels },
+  });
+  const input = {
+    providerInstances: {
+      claude_opus_lead: claude([]),
+      claude_retired_astra: claude(["gpt-6.2-astra"], false),
+      claude_astra_lead: claude(["gpt-6.2-astra"]),
+      claude_sol: claude([]),
+      codex_astra: { driver: "codex", enabled: true, config: { customModels: ["gpt-6.2-sol"] } },
+    },
+    providerModelPreferences: {
+      claude_opus_lead: { hiddenModels: ["gpt-6.2-sol"], modelOrder: [] },
+      claude_sol: { hiddenModels: ["claude-opus-5-5"], modelOrder: ["gpt-6.2-sol"] },
+    },
+  };
+  const settings = decodeServerSettings(input);
+  const select = (instanceId: string, model: string) =>
+    createModelSelection(ProviderInstanceId.make(instanceId), model, [
+      { id: "effort", value: "high" },
+    ]);
+
+  it("moves a model to the enabled instance of its driver that runs it", () => {
+    // Mobile created claude_opus_lead + gpt-6.2-astra; the launcher refused it.
+    expect(
+      resolveServingModelSelection(settings, null, select("claude_opus_lead", "gpt-6.2-astra")),
+    ).toEqual(select("claude_astra_lead", "gpt-6.2-astra"));
+    expect(
+      resolveServingModelSelection(settings, null, select("claude_opus_lead", "gpt-6.2-sol")),
+    ).toEqual(select("claude_sol", "gpt-6.2-sol"));
+  });
+
+  it("keeps selections an instance serves, and ones no other instance claims", () => {
+    for (const selection of [
+      select("claude_astra_lead", "gpt-6.2-astra"),
+      select("claude_opus_lead", "claude-opus-5-5"),
+      select("claude_sol", "claude-opus-5-5"),
+    ]) {
+      expect(resolveServingModelSelection(settings, null, selection)).toBe(selection);
+    }
+    expect(
+      providerInstanceServesModel(
+        settings,
+        null,
+        ProviderInstanceId.make("claude_sol"),
+        "claude-opus-5-5",
+      ),
+    ).toBe(false);
+  });
+
+  it("ignores instances the project turned off", () => {
+    const projectId = ProjectId.make("project-astra-off");
+    const scoped = decodeServerSettings({
+      ...input,
+      projectSettingsOverrides: {
+        [projectId]: { providerInstances: { claude_astra_lead: { enabled: false } } },
+      },
+    });
+    const selection = select("claude_opus_lead", "gpt-6.2-astra");
+    expect(resolveServingModelSelection(scoped, projectId, selection)).toBe(selection);
+    expect(
+      providerInstanceServesModel(
+        scoped,
+        projectId,
+        ProviderInstanceId.make("claude_opus_lead"),
+        "gpt-6.2-astra",
+      ),
+    ).toBe(true);
   });
 });
