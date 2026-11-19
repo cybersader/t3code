@@ -1,5 +1,11 @@
 // @effect-diagnostics-next-line nodeBuiltinImport:off -- the SDK's spawn hook returns a Node child process.
 import * as NodeChildProcess from "node:child_process";
+import {
+  CLAUDE_PROBE_FAILURE_CATEGORIES,
+  claudeProbeFailureCategory,
+  claudeProbeFailureMessage,
+  makeClaudeProbeStderrClassifier,
+} from "./claudeProbeDiagnostics.ts";
 
 import { resolveProviderProbeTimeoutMs } from "@t3tools/provider-core/server/snapshotProbe";
 import {
@@ -275,6 +281,7 @@ export function buildClaudeCapabilitiesProbeQueryOptions(input: {
   readonly cwd: string | undefined;
   readonly managedMcpConfig: boolean;
   readonly spawnVia: "env" | "launcher-thread" | undefined;
+  readonly onStderr?: (chunk: string) => void;
 }): ClaudeQueryOptions {
   return {
     ...(input.spawnVia === "env" ? { spawnClaudeCodeProcess: spawnClaudeProbeThroughEnv } : {}),
@@ -301,7 +308,7 @@ export function buildClaudeCapabilitiesProbeQueryOptions(input: {
       CLAUDE_CODE_IDE_SKIP_AUTO_INSTALL: "1",
     },
     ...(input.cwd ? { cwd: input.cwd } : {}),
-    stderr: () => {},
+    stderr: input.onStderr ?? (() => {}),
   };
 }
 
@@ -478,7 +485,11 @@ function claudeGatewayDiscoveryGraceMs(environment: Readonly<Record<string, unkn
 
 class ClaudeCapabilitiesProbeSdkError extends Schema.TaggedError<ClaudeCapabilitiesProbeSdkError>()(
   "ClaudeCapabilitiesProbeSdkError",
-  { operation: Schema.Literals(["initialize", "usage", "settings"]), cause: Schema.Defect() },
+  {
+    operation: Schema.Literals(["initialize", "usage", "settings"]),
+    cause: Schema.Defect(),
+    failureCategory: Schema.optional(Schema.Literals(CLAUDE_PROBE_FAILURE_CATEGORIES)),
+  },
 ) {
   override get message(): string {
     return `Claude capability probe ${this.operation} failed.`;
@@ -503,6 +514,10 @@ const probeClaudeCapabilities = (
       claudeEnvironment,
     );
     const managedMcpConfig = yield* hasClaudeManagedMcpConfig();
+    const stderrClassifier = makeClaudeProbeStderrClassifier();
+    // The restricted proxy wrapper has account-source quotas, not claude.ai usage windows.
+    const nativeUsageUnsupported =
+      (yield* Path.Path).basename(executablePath) === "claude-x-t3-restricted";
     // Workspace probes (no usage) discard models; the machine probe refreshes the shared cache.
     const graceMs = includeStatus
       ? claudeGatewayDiscoveryGraceMs({
@@ -531,18 +546,24 @@ const probeClaudeCapabilities = (
             cwd,
             managedMcpConfig,
             spawnVia,
+            onStderr: stderrClassifier.observe,
           }),
         });
         const init = await q.initializationResult();
-        return { q, init, graceMs };
+        return { q, init, graceMs, nativeUsageUnsupported };
       },
-      catch: (cause) => new ClaudeCapabilitiesProbeSdkError({ operation: "initialize", cause }),
+      catch: (cause) =>
+        new ClaudeCapabilitiesProbeSdkError({
+          operation: "initialize",
+          cause,
+          failureCategory: claudeProbeFailureCategory(cause, stderrClassifier.category()),
+        }),
     });
   }).pipe(
     Effect.timeout(
       resolveProviderProbeTimeoutMs("claude", CAPABILITIES_PROBE_TIMEOUT_MS, environment),
     ),
-    Effect.flatMap(({ q, init, graceMs }) =>
+    Effect.flatMap(({ q, init, graceMs, nativeUsageUnsupported }) =>
       Effect.gen(function* () {
         // Usage has its own deadline so a slow optional request cannot discard initialization.
         // Only the rate limits are read, so skip the local transcript scan that fills
@@ -552,7 +573,7 @@ const probeClaudeCapabilities = (
         const { getSettings } = q as ClaudeSettingsQuery;
         const [usageResult, settingsResult] = yield* Effect.all(
           [
-            includeStatus
+            includeStatus && !nativeUsageUnsupported
               ? Effect.tryPromise({
                   try: () =>
                     q.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET({
@@ -573,12 +594,14 @@ const probeClaudeCapabilities = (
           { concurrency: "unbounded" },
         );
         const usage =
-          usageResult && Result.isSuccess(usageResult)
-            ? {
-                rate_limits_available: usageResult.success.rate_limits_available,
-                rate_limits: usageResult.success.rate_limits,
-              }
-            : undefined;
+          includeStatus && nativeUsageUnsupported
+            ? { rate_limits_available: false, rate_limits: null }
+            : usageResult && Result.isSuccess(usageResult)
+              ? {
+                  rate_limits_available: usageResult.success.rate_limits_available,
+                  rate_limits: usageResult.success.rate_limits,
+                }
+              : undefined;
         const effortCapSources = parseClaudeEffortCapSources(
           settingsResult && Result.isSuccess(settingsResult) ? settingsResult.success : undefined,
         );
@@ -819,7 +842,7 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
         message: probeFailure
           ? Cause.isTimeoutError(probeFailure)
             ? `Timed out after ${resolveProviderProbeTimeoutMs("claude", CAPABILITIES_PROBE_TIMEOUT_MS, resolvedEnvironment) / 1_000}s while checking Claude account status.`
-            : "Claude Agent CLI failed while checking account status."
+            : claudeProbeFailureMessage(probeFailure)
           : "Could not verify Claude authentication status from initialization result.",
       },
     });

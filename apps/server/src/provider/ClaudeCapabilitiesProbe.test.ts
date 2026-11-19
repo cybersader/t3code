@@ -74,6 +74,78 @@ it.effect("reports a deleted worktree's scan as finished, not pending", () =>
   }).pipe(Effect.provide(NodeServices.layer)),
 );
 
+it.effect.each([
+  { binaryPath: "claude-x-t3-restricted", restricted: true, usageFails: false },
+  { binaryPath: "/opt/bin/claude-x-t3-restricted", restricted: true, usageFails: true },
+  { binaryPath: "claude", restricted: false, usageFails: false },
+  { binaryPath: "/opt/bin/claude", restricted: false, usageFails: true },
+  { binaryPath: "claude-x-t3-restricted-other", restricted: false, usageFails: true },
+  { binaryPath: "/opt/claude-x-t3-restricted/claude", restricted: false, usageFails: true },
+])("keeps native usage separate from proxy accounts: $binaryPath, failure=$usageFails", (test) =>
+  Effect.gen(function* () {
+    const usage = vi.fn(async () => {
+      if (test.usageFails) throw new Error("usage unavailable");
+      return { rate_limits_available: true, rate_limits: { five_hour: { utilization: 12 } } };
+    });
+    const query = vi.spyOn(ClaudeSdk, "query").mockImplementation(
+      () =>
+        ({
+          initializationResult: async () => ({
+            account: { email: "dev@example.com", subscriptionType: "pro", tokenSource: "oauth" },
+            commands: [{ name: "review", description: "Review changes", argumentHint: "" }],
+            models: [{ value: "gateway/model", displayName: "Relay", description: "" }],
+          }),
+          usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET: usage,
+        }) as unknown as ReturnType<typeof ClaudeSdk.query>,
+    );
+    yield* Effect.addFinalizer(() => Effect.sync(() => query.mockRestore()));
+    const configDir = yield* (yield* FileSystem.FileSystem).makeTempDirectoryScoped();
+    const settings = yield* decodeClaudeSettings({ binaryPath: test.binaryPath });
+    const capabilities = yield* probeClaudeCapabilities(settings, { CLAUDE_CONFIG_DIR: configDir });
+    assert.equal(query.mock.calls.length, 1);
+    assert.equal(capabilities.email, "dev@example.com");
+    assert.equal(capabilities.slashCommands[0]?.name, "review");
+    assert.equal(capabilities.models?.[0]?.value, "gateway/model");
+    if (test.restricted) {
+      assert.equal(usage.mock.calls.length, 0);
+      assert.deepEqual(capabilities.usage, { rate_limits_available: false, rate_limits: null });
+    } else {
+      assert.equal(usage.mock.calls.length, 1);
+      assert.deepEqual(usage.mock.calls[0], [{ skipBehaviors: true }]);
+      assert.equal(capabilities.usage?.rate_limits_available, test.usageFails ? undefined : true);
+    }
+    const workspace = yield* probeClaudeCapabilities(
+      settings,
+      { CLAUDE_CONFIG_DIR: configDir },
+      configDir,
+      false,
+    );
+    assert.equal(workspace.usage, undefined);
+    assert.equal(usage.mock.calls.length, test.restricted ? 0 : 1);
+  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
+
+it.effect("does not turn initialization failures into unsupported native usage", () =>
+  Effect.gen(function* () {
+    const query = vi.spyOn(ClaudeSdk, "query").mockImplementation(
+      () =>
+        ({
+          initializationResult: async () => {
+            throw new Error("initialization failed");
+          },
+        }) as unknown as ReturnType<typeof ClaudeSdk.query>,
+    );
+    yield* Effect.addFinalizer(() => Effect.sync(() => query.mockRestore()));
+    const configDir = yield* (yield* FileSystem.FileSystem).makeTempDirectoryScoped();
+    for (const binaryPath of ["claude", "claude-x-t3-restricted"]) {
+      const result = yield* probeClaudeCapabilities(yield* decodeClaudeSettings({ binaryPath }), {
+        CLAUDE_CONFIG_DIR: configDir,
+      }).pipe(Effect.result);
+      assert.equal(result._tag, "Failure");
+    }
+  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
+
 it.effect("keeps the probe subprocess alive while gateway model discovery can finish", () =>
   Effect.gen(function* () {
     let abortSignal: AbortSignal | undefined;
