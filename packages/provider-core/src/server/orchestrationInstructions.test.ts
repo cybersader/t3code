@@ -10,6 +10,26 @@ import {
 } from "./orchestrationInstructions.ts";
 
 describe("T3 device instructions", () => {
+  it("route independent T3 conversations without disabling native child control", () => {
+    for (const text of [
+      "including cross-project collaboration",
+      "`t3_thread_list`",
+      "`t3_thread_read`",
+      "`t3_thread_send`",
+      "`tool_search`",
+      "`ToolSearch`",
+      "If unavailable, say so; never silently substitute",
+      "parent/own-subagent discovery, messaging and control",
+      "including `ListAgents` and `SendMessage` where needed",
+      "a separate operation requiring an explicit owner request",
+      "a shared host or account is not authority",
+    ]) {
+      assert.include(T3_CODE_ORCHESTRATION_INSTRUCTIONS, text);
+    }
+    assert.include(t3OrchestrationSystemPrompt(true, false), T3_CODE_ORCHESTRATION_INSTRUCTIONS);
+    assert.isUndefined(t3OrchestrationSystemPrompt(false, false));
+  });
+
   it("route device work through device_open and give Claude the line that loads the tools", () => {
     for (const intent of ["`device_list`", "`device_open`", "`agent-device`", "ssh", "`hostId`"]) {
       assert.include(T3_CODE_DEVICE_TOOL_INSTRUCTIONS, intent);
