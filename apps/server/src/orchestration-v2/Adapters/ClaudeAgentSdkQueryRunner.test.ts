@@ -881,6 +881,30 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")("Claude CLI pro
     }).pipe(Effect.provide(realQueryRunner)),
   );
 
+  // The T3 launcher wrapper writes its refusal reason for people; the rest of stderr stays private.
+  it.effect("shows a T3 launcher's refusal reason and keeps other stderr out", () =>
+    Effect.gen(function* () {
+      const reason = yield* startupFailureMessage(
+        "token=sk-private-123\nt3-launch: worker policy missing; choose Worker routing in T3\nat /home/private/x",
+      );
+      assert.include(
+        reason,
+        "The launcher refused this turn: worker policy missing; choose Worker routing in T3. (t3_launch_refused)",
+      );
+      assert.notInclude(reason, "sk-private-123");
+      assert.notInclude(reason, "/home/private");
+
+      const labelled = yield* startupFailureMessage(
+        "t3-restricted: rejected (parser) /home/private/x",
+      );
+      assert.include(
+        labelled,
+        "The launcher refused this turn: restricted launcher rejected the launch options. (restricted_startup_refused)",
+      );
+      assert.notInclude(labelled, "/home/private");
+    }).pipe(Effect.provide(realQueryRunner)),
+  );
+
   // What Claude Code writes when the session store behind --resume is gone.
   it.effect("names a resumed conversation Claude Code cannot find", () =>
     Effect.gen(function* () {

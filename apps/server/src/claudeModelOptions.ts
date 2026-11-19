@@ -1,11 +1,16 @@
-import type { ModelSelection } from "@t3tools/contracts";
+import {
+  CLAUDE_WORKER_PRESET_DESCRIPTOR,
+  readClaudeWorkerPreset,
+  type ClaudeWorkerPreset,
+  type ModelSelection,
+  type ServerProviderModel,
+} from "@t3tools/contracts";
 import {
   getModelSelectionBooleanOptionValue,
   getModelSelectionStringOptionValue,
   getProviderOptionDescriptors,
   resolvePromptInjectedEffort,
 } from "@t3tools/shared/model";
-
 import {
   BUNDLED_CLAUDE_MODEL_CATALOG,
   getClaudeCatalogModelCapabilities,
@@ -18,6 +23,28 @@ import {
 } from "./provider/ClaudeModelCatalog.ts";
 
 const CLAUDE_CODE_MODEL_ALIASES = new Set(["opus", "sonnet", "haiku", "fable"]);
+export function isClaudeWorkerPresetWrapper(binaryPath: string | undefined): boolean {
+  return binaryPath?.split(/[\\/]/).at(-1) === "claude-x-t3-restricted";
+}
+
+export function withClaudeWorkerPresetModels(
+  models: ReadonlyArray<ServerProviderModel>,
+  binaryPath: string,
+): ReadonlyArray<ServerProviderModel> {
+  if (!isClaudeWorkerPresetWrapper(binaryPath)) return models;
+  return models.map((model) => ({
+    ...model,
+    capabilities: {
+      ...model.capabilities,
+      optionDescriptors: [
+        ...(model.capabilities?.optionDescriptors ?? []).filter(
+          (option) => option.id !== "workerPreset",
+        ),
+        CLAUDE_WORKER_PRESET_DESCRIPTOR,
+      ],
+    },
+  }));
+}
 
 export interface CompiledClaudeModelSelection {
   readonly apiModelId: string;
@@ -27,12 +54,14 @@ export interface CompiledClaudeModelSelection {
   /** The alias of a custom model named like one, which Claude Code would otherwise expand. */
   readonly pinnedAlias: string | undefined;
   readonly queryIdentity: string;
+  readonly workerPreset?: ClaudeWorkerPreset;
 }
 
 export function compileClaudeModelSelection(
   selection: ModelSelection,
   catalog: ClaudeModelCatalog = BUNDLED_CLAUDE_MODEL_CATALOG,
 ): CompiledClaudeModelSelection {
+  const workerPreset = readClaudeWorkerPreset(selection.options);
   const capabilities = getClaudeCatalogModelCapabilities(catalog, selection.model);
   const descriptors = getProviderOptionDescriptors({
     caps: capabilities,
@@ -70,12 +99,14 @@ export function compileClaudeModelSelection(
     effort,
     promptEffort,
     settings,
+    ...(workerPreset === undefined ? {} : { workerPreset }),
     pinnedAlias,
     queryIdentity: JSON.stringify({
       apiModelId,
       effort: effort ?? null,
       settings,
       pinnedAlias: pinnedAlias ?? null,
+      ...(workerPreset === undefined ? {} : { workerPreset }),
     }),
   };
 }

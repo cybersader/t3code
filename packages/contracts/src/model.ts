@@ -48,13 +48,102 @@ export type ProviderOptionDescriptor = typeof ProviderOptionDescriptor.Type;
 export const ProviderOptionSelectionValue = Schema.Union([TrimmedNonEmptyString, Schema.Boolean]);
 export type ProviderOptionSelectionValue = typeof ProviderOptionSelectionValue.Type;
 
+export const ClaudeWorkerPreset = Schema.Literals([
+  "saved",
+  "opus55xm",
+  "astraxm",
+  "astrax",
+  "astraxma",
+]);
+export type ClaudeWorkerPreset = typeof ClaudeWorkerPreset.Type;
+const isClaudeWorkerPreset = Schema.is(ClaudeWorkerPreset);
+
+export const CLAUDE_WORKER_PRESET_DESCRIPTOR: SelectProviderOptionDescriptor = {
+  id: "workerPreset",
+  label: "Worker routing",
+  description:
+    "Selects existing worker routing and guardrails; does not grant budgets or premium-worker authority.",
+  type: "select",
+  options: [
+    {
+      id: "saved",
+      label: "Saved project policy",
+      description:
+        "Use the canonical project policy. Existing approval and budget limits still apply.",
+    },
+    {
+      id: "opus55xm",
+      label: "Cross-provider · Opus default",
+      description:
+        "Existing cross-provider catalogue, including configured prepaid GLM. No automatic prepaid fallback or new allowance.",
+    },
+    {
+      id: "astraxm",
+      label: "Cross-provider · Astra default",
+      description:
+        "Existing cross-provider catalogue, including configured prepaid GLM. Premium-worker approval and budgets remain required.",
+    },
+    {
+      id: "astraxma",
+      label: "Codex only · automatic",
+      description:
+        "Automatic worker choice within the existing Codex-only policy; no new budget or premium authority.",
+    },
+    {
+      id: "astrax",
+      label: "Sol only · locked",
+      description:
+        "Workers are locked to Sol, not automatic model choice. Existing guards and budgets still apply.",
+    },
+  ],
+};
+
+export function readClaudeWorkerPreset(
+  options: ReadonlyArray<ProviderOptionSelection> | undefined,
+): ClaudeWorkerPreset | undefined {
+  const selections = options?.filter((option) => option.id === "workerPreset") ?? [];
+  if (
+    selections.length > 1 ||
+    (selections.length === 1 && !isClaudeWorkerPreset(selections[0]?.value))
+  ) {
+    throw new Error("Invalid or duplicate Worker routing preset.");
+  }
+  return selections[0]?.value as ClaudeWorkerPreset | undefined;
+}
+
+export function preserveClaudeWorkerPreset(
+  current: ReadonlyArray<ProviderOptionSelection> | undefined,
+  next: ReadonlyArray<ProviderOptionSelection> | undefined,
+  supported: boolean,
+): ReadonlyArray<ProviderOptionSelection> | undefined {
+  if (!supported) return next;
+  const preset = readClaudeWorkerPreset(current);
+  const options = (next ?? []).filter((option) => option.id !== "workerPreset");
+  if (preset !== undefined) options.push({ id: "workerPreset", value: preset });
+  return options.length > 0 ? options : undefined;
+}
+
 export const ProviderOptionSelection = Schema.Struct({
   id: TrimmedNonEmptyString,
   value: ProviderOptionSelectionValue,
-});
+}).check(
+  Schema.makeFilter(
+    (option) => option.id !== "workerPreset" || isClaudeWorkerPreset(option.value),
+    {
+      message: "Worker routing must be saved, opus55xm, astraxm, astrax or astraxma.",
+    },
+  ),
+);
 export type ProviderOptionSelection = typeof ProviderOptionSelection.Type;
 
-const LegacyProviderOptionSelectionsObject = Schema.Record(Schema.String, Schema.Unknown);
+const LegacyProviderOptionSelectionsObject = Schema.Record(Schema.String, Schema.Unknown).check(
+  Schema.makeFilter(
+    (record) => !("workerPreset" in record) || isClaudeWorkerPreset(record.workerPreset),
+    {
+      message: "Invalid Worker routing preset.",
+    },
+  ),
+);
 
 const ProviderOptionSelectionsFromLegacyObject = LegacyProviderOptionSelectionsObject.pipe(
   Schema.decodeTo(
@@ -69,7 +158,14 @@ const ProviderOptionSelectionsFromLegacyObject = LegacyProviderOptionSelectionsO
 export const ProviderOptionSelections = Schema.Union([
   Schema.Array(ProviderOptionSelection),
   ProviderOptionSelectionsFromLegacyObject,
-]);
+]).check(
+  Schema.makeFilter(
+    (options) => options.filter((option) => option.id === "workerPreset").length <= 1,
+    {
+      message: "Duplicate Worker routing presets are not supported.",
+    },
+  ),
+);
 export type ProviderOptionSelections = typeof ProviderOptionSelections.Type;
 
 function coerceLegacyOptionsObjectToArray(

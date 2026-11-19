@@ -9,6 +9,7 @@ import {
   type EnvironmentId,
   type ModelSelection,
   ProviderInstanceId,
+  preserveClaudeWorkerPreset,
   type ServerProvider,
   type ThreadId,
   RuntimeMode,
@@ -209,9 +210,20 @@ export function useComposerSelection(input: ComposerSelectionInput) {
             )
           ? threadSelection.options
           : undefined;
+    const supportsWorkerPreset =
+      entry?.models
+        .find((candidate) => candidate.slug === resolvedModel)
+        ?.capabilities?.optionDescriptors?.some((option) => option.id === "workerPreset") === true;
+    const nextOptions = preserveClaudeWorkerPreset(
+      shownSelection.options,
+      supportsWorkerPreset
+        ? pickOptions
+        : pickOptions?.filter((option) => option.id !== "workerPreset"),
+      supportsWorkerPreset,
+    );
     const nextModelSelection: ModelSelection =
-      pickOptions !== undefined && pickOptions.length > 0
-        ? { instanceId, model: resolvedModel, options: [...pickOptions] }
+      nextOptions !== undefined && nextOptions.length > 0
+        ? { instanceId, model: resolvedModel, options: [...nextOptions] }
         : { instanceId, model: resolvedModel };
     const modelChangeBlockReason = getStartedThreadModelChangeBlockReason({
       hasStartedSession: activeRuntime !== null,
@@ -233,7 +245,7 @@ export function useComposerSelection(input: ComposerSelectionInput) {
       explicit: true,
       replaceOptions: true,
     });
-    setStickyComposerModelSelection(nextModelSelection);
+    setStickyComposerModelSelection(nextModelSelection, { replaceWorkerPreset: true });
     if (!isLocalDraftThread) applyThreadModelPick(threadRef);
     if (options?.focusComposer !== false) scheduleComposerFocus();
   };

@@ -634,7 +634,13 @@ interface ComposerDraftStoreState {
   markDraftThreadPromoting: (threadRef: ComposerThreadTarget, promotedTo?: ScopedThreadRef) => void;
   finalizePromotedDraftThread: (threadRef: ComposerThreadTarget) => void;
   clearDraftThread: (threadRef: ComposerThreadTarget) => void;
-  setStickyModelSelection: (modelSelection: ModelSelection | null | undefined) => void;
+  setStickyModelSelection: (
+    modelSelection: ModelSelection | null | undefined,
+    opts?: {
+      /** The composer resolved worker routing, including its deliberate omission. */
+      replaceWorkerPreset?: boolean;
+    },
+  ) => void;
   setPrompt: (threadRef: ComposerThreadTarget, prompt: string) => void;
   setTerminalContexts: (threadRef: ComposerThreadTarget, contexts: TerminalContextDraft[]) => void;
   setModelSelection: (
@@ -3199,18 +3205,22 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
             return removeDraftThreadReferences(state, threadKey);
           });
         },
-        setStickyModelSelection: (modelSelection) => {
+        setStickyModelSelection: (modelSelection, opts) => {
           const normalized = normalizeModelSelection(modelSelection);
           set((state) => {
             if (!normalized) {
               return state;
             }
             const current = state.stickyModelSelectionByProvider[normalized.instanceId];
-            // Model-only updates omit options; preserve sticky traits across model switches and new chats.
+            // Model-only updates retain sticky traits. A resolved composer pick must not
+            // resurrect worker routing that it deliberately omitted or cannot support.
+            const retainedOptions = opts?.replaceWorkerPreset
+              ? current?.options?.filter((option) => option.id !== "workerPreset")
+              : current?.options;
             const nextSelection =
               normalized.options !== undefined
                 ? normalized
-                : createModelSelection(normalized.instanceId, normalized.model, current?.options);
+                : createModelSelection(normalized.instanceId, normalized.model, retainedOptions);
             const nextMap: Partial<Record<ProviderInstanceId, ModelSelection>> = {
               ...state.stickyModelSelectionByProvider,
               [normalized.instanceId]: nextSelection,

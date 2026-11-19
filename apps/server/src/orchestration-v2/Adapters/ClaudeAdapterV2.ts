@@ -71,6 +71,8 @@ import type {
 } from "@anthropic-ai/claude-agent-sdk/sdk-tools";
 // @effect-diagnostics-next-line nodeBuiltinImport:off -- the SDK takes a Node ChildProcess for the CLI.
 import * as NodeChildProcess from "node:child_process";
+// @effect-diagnostics-next-line nodeBuiltinImport:off -- a sync digest keeps approval diagnostics free of a new service requirement.
+import * as NodeCrypto from "node:crypto";
 import * as NodeUtil from "node:util";
 import { parseCliArgs, tokenizeCliArgs } from "@t3tools/shared/cliArgs";
 import { fromLenientJson } from "@t3tools/shared/schemaJson";
@@ -178,6 +180,7 @@ import {
 } from "../../provider/Drivers/ClaudeSkills.ts";
 import {
   compileClaudeModelSelection,
+  isClaudeWorkerPresetWrapper,
   type CompiledClaudeModelSelection,
 } from "../../claudeModelOptions.ts";
 import * as ServerConfig from "../../config.ts";
@@ -234,6 +237,7 @@ import {
 import { turnScopedSelectionTransition } from "@t3tools/provider-core/server/selectionTransition";
 import { providerMessageTextWithAttachmentPaths } from "@t3tools/provider-core/server/attachmentPrompt";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
+import { claudeLauncherRefusalGuidance } from "./claudeLauncherRefusal.ts";
 import {
   ProviderAdapterDriverCreateError,
   type ProviderAdapterDriverCreateInput,
@@ -1790,7 +1794,9 @@ export const layerQueryRunner: Layer.Layer<
                       : startupExit !== undefined
                         ? new ClaudeCodeStartupExitError({
                             status: startupExit.status,
-                            guidance: providerProcessExitGuidance(stderrTail),
+                            guidance:
+                              claudeLauncherRefusalGuidance(stderrTail) ??
+                              providerProcessExitGuidance(stderrTail),
                             cause,
                           })
                         : cause,
@@ -2144,11 +2150,12 @@ export const layerQueryRunner: Layer.Layer<
 type ClaudeFlagSettings = Parameters<ClaudeQuery["applyFlagSettings"]>[0];
 
 /** Thinking requires a new process. Clearing effort also requires one to reload user settings instead of model defaults. */
-function canApplyClaudeSelectionLive(
+export function canApplyClaudeSelectionLive(
   live: CompiledClaudeModelSelection,
   next: CompiledClaudeModelSelection,
 ): boolean {
   return (
+    live.workerPreset === next.workerPreset &&
     live.settings.alwaysThinkingEnabled === next.settings.alwaysThinkingEnabled &&
     (next.effort !== undefined || live.effort === undefined) &&
     live.pinnedAlias === next.pinnedAlias
@@ -2293,6 +2300,17 @@ export function makeClaudeQueryOptions(input: {
   } = input.settings === undefined
     ? {}
     : parseCliArgs(input.settings.launchArgs, claudeLaunchArgParseOptions).flags;
+  if (Object.hasOwn(extraArgs, "worker-preset")) {
+    throw new Error(
+      "Worker routing must be selected through the native Worker routing control, not launch arguments.",
+    );
+  }
+  if (compiledSelection.workerPreset !== undefined) {
+    if (!isClaudeWorkerPresetWrapper(input.settings?.binaryPath)) {
+      throw new Error("Worker routing requires the claude-x-t3-restricted wrapper.");
+    }
+    extraArgs["worker-preset"] = compiledSelection.workerPreset;
+  }
   // Claude Code overwrites its CLI append text with the SDK's initialize
   // appendSystemPrompt, so launch-argument text has to travel in that value.
   // The CLI puts file text before inline text and trims one trailing newline.
@@ -4417,11 +4435,12 @@ const CLAUDE_NO_STANDING_GRANT_OPTIONS = [
 ] satisfies ReadonlyArray<ProviderApprovalOption>;
 
 export function claudeApprovalPresentation(input: {
-  readonly permissionMode: PermissionMode;
+  // Last observed root mode, not the requested policy or a child's effective mode.
+  readonly permissionMode: PermissionMode | undefined;
   readonly prompt: string;
   readonly callbackOptions: Pick<
     Parameters<CanUseTool>[2],
-    "decisionReason" | "matchedAskRule" | "suppressAlwaysAllowRule"
+    "decisionReason" | "matchedAskRule" | "suppressAlwaysAllowRule" | "agentID"
   >;
 }): {
   readonly reason?: string;
@@ -4432,11 +4451,12 @@ export function claudeApprovalPresentation(input: {
   const reason = NodeUtil.stripVTControlCharacters(
     input.callbackOptions.decisionReason ?? "",
   ).trim();
-  // Bypass auto-allows everything it can, so any ask that still reaches the
-  // callback is one bypass refused. The SDK drops the CLI's decision_reason_type,
-  // leaving the matched ask rule as the only way to tell the two causes apart.
+  // A requested bypass mode is not evidence that bypass handled this request.
+  // Child callbacks identify their requester but do not report its effective mode.
+  // Even for a last-observed root bypass, provider_check remains an inference:
+  // the SDK omits decision_reason_type and native mode updates can be queued.
   const fullAccessOverride: ProviderApprovalFullAccessOverride | undefined =
-    input.permissionMode !== "bypassPermissions"
+    input.permissionMode !== "bypassPermissions" || input.callbackOptions.agentID !== undefined
       ? undefined
       : input.callbackOptions.matchedAskRule === undefined
         ? "provider_check"
@@ -5255,6 +5275,8 @@ interface ClaudeLiveQueryContext {
   capabilities: ReadonlySet<string>;
   claudeCodeVersion: string | undefined;
   permissionMode: PermissionMode;
+  // Unknown until a native init/status or successful mode-control reply arrives.
+  observedPermissionMode: PermissionMode | undefined;
   stopping: boolean;
   // A turn that had not attached when the CLI exited fails its start with this cause.
   exitCause: Cause.Cause<ClaudeAgentSdkQueryRunnerError> | undefined;
@@ -12550,8 +12572,10 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             } satisfies PermissionResult;
           }
 
+          const liveQuery = yield* Ref.get(queryContext);
+          const observedRootPermissionMode = liveQuery?.observedPermissionMode;
           const activePermissionMode =
-            (yield* Ref.get(queryContext))?.permissionMode ?? context.queryPolicy.permissionMode;
+            liveQuery?.permissionMode ?? context.queryPolicy.permissionMode;
           const safetyReason = NodeUtil.stripVTControlCharacters(
             callbackOptions.decisionReason ?? "",
           ).trim();
@@ -12588,10 +12612,21 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             requestKind,
             prompt,
             presentation: claudeApprovalPresentation({
-              permissionMode: context.queryPolicy.permissionMode,
+              permissionMode: observedRootPermissionMode,
               prompt,
               callbackOptions,
             }),
+          });
+          // Deliberately omit commands, reasons, rule text, paths and native IDs.
+          yield* Effect.logInfo("orchestration-v2.claude-approval-provenance", {
+            requestFingerprint: NodeCrypto.createHash("sha256")
+              .update(artifacts.request.id)
+              .digest("hex"),
+            requestedPermissionMode: context.queryPolicy.permissionMode,
+            observedRootPermissionMode: observedRootPermissionMode ?? "unknown",
+            requester: callbackOptions.agentID === undefined ? "root-or-unattributed" : "subagent",
+            matchedAskRule: callbackOptions.matchedAskRule !== undefined,
+            hasDecisionReason: safetyReason !== "",
           });
           const decision = yield* Deferred.make<ClaudeApprovalResponse, never>();
           yield* Ref.update(pendingRuntimeRequests, (current) => {
@@ -12990,6 +13025,15 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           );
           let compiledSelection = compileClaudeModelSelection(turnInput.modelSelection, catalog);
           if (
+            compiledSelection.workerPreset !== undefined &&
+            !isClaudeWorkerPresetWrapper(adapterOptions.settings.binaryPath)
+          ) {
+            return yield* new ProviderAdapter.ProviderAdapterProtocolError({
+              driver: CLAUDE_PROVIDER,
+              detail: "Worker routing requires the claude-x-t3-restricted wrapper.",
+            });
+          }
+          if (
             !turnInput.resume &&
             existing !== null &&
             existing.nativeThreadId === nativeThreadId &&
@@ -13026,6 +13070,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                         : Effect.fail(error),
                   }),
                 );
+              existing.observedPermissionMode = existing.permissionMode;
             }
             return existing;
           }
@@ -13188,6 +13233,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             capabilities: new Set(),
             claudeCodeVersion: undefined,
             permissionMode: queryOptions.permissionMode,
+            observedPermissionMode: undefined,
             stopping: false,
             exitCause: undefined,
             handedOffSubagents: new Set(),
@@ -13246,6 +13292,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                     message.permissionMode !== undefined
                   ) {
                     context.permissionMode = message.permissionMode;
+                    context.observedPermissionMode = message.permissionMode;
                   }
                   if (message.type === "result") {
                     const ledger = claudeModelLedger(message.modelUsage);

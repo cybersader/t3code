@@ -39,6 +39,7 @@ import {
 import { makeManagedServerProvider } from "@t3tools/provider-core/server/managedProvider";
 import * as ModelCatalog from "@t3tools/provider-core/server/ModelCatalog";
 import { resolveClaudeModelCatalog } from "../ClaudeModelCatalog.ts";
+import { withClaudeWorkerPresetModels } from "../../claudeModelOptions.ts";
 import {
   makeClaudeCodeModelRoutes,
   resolveClaudeModelSettingsKey,
@@ -294,7 +295,12 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv, Path.
               ? Cache.invalidateAll(capabilitiesProbeCache)
               : Effect.void,
           ),
-          Effect.map(stampIdentity),
+          Effect.map((snapshot) =>
+            stampIdentity({
+              ...snapshot,
+              models: withClaudeWorkerPresetModels(snapshot.models, effectiveConfig.binaryPath),
+            }),
+          ),
         ),
       ),
       // Disabled, failed version checks and interruption never reach the probe.
@@ -313,7 +319,12 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv, Path.
       initialSnapshot: (settings) =>
         modelCatalog.pipe(
           Effect.flatMap((catalog) => makePendingClaudeProvider(settings.provider, catalog)),
-          Effect.map(stampIdentity),
+          Effect.map((snapshot) =>
+            stampIdentity({
+              ...snapshot,
+              models: withClaudeWorkerPresetModels(snapshot.models, effectiveConfig.binaryPath),
+            }),
+          ),
         ),
       checkProvider,
       invalidateUsageCache: Cache.invalidateAll(capabilitiesProbeCache),
