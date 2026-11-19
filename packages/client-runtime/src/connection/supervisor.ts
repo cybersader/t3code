@@ -44,7 +44,14 @@ import {
 } from "./routes.ts";
 
 const RETRY_BASE_DELAY_MS = 1_000;
-const RETRY_MAX_DELAY_MS = 300_000;
+// A server that comes back (for example after a network flap drops every socket)
+// is found again within this long, however many attempts failed before.
+const RETRY_MAX_DELAY_MS = 30_000;
+// The platform's offline report can stay wrong after the network is back, so
+// an offline connection still tries this often instead of waiting for a change.
+const OFFLINE_RECHECK_MS = 30_000;
+// Nothing changes on this device while it waits for approval, so it may poll slowly.
+const APPROVAL_PENDING_MAX_DELAY_MS = 300_000;
 const SESSION_LOSS_RETRY_DELAY_MS = 250;
 // Someone is approving this device on the host; check back soon rather than climbing the ladder.
 const APPROVAL_PENDING_RETRY_DELAY_MS = 4_000;
@@ -167,8 +174,12 @@ export interface EnvironmentSupervisorOptions {
   }) => Effect.Effect<Option.Option<ConnectionCatalogEntry>>;
 }
 
-function retryDelayMs(failureCount: number, random: number): number {
-  const ceiling = Math.min(RETRY_MAX_DELAY_MS, RETRY_BASE_DELAY_MS * 2 ** (failureCount + 1));
+function retryDelayMs(
+  failureCount: number,
+  random: number,
+  maxDelayMs: number = RETRY_MAX_DELAY_MS,
+): number {
+  const ceiling = Math.min(maxDelayMs, RETRY_BASE_DELAY_MS * 2 ** (failureCount + 1));
   return Math.round(ceiling / 2 + (ceiling / 2) * random);
 }
 
@@ -1195,6 +1206,7 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
       pendingRetry = Option.none();
     };
     let replacing = false;
+    let offlineRecheckDue = false;
 
     for (;;) {
       const retryRequested = yield* Ref.getAndSet(resetRetryState, false);
@@ -1216,14 +1228,15 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
       }
       // The platform's offline report can stay wrong after the network is back,
       // so an explicit retry still tries instead of waiting for it to change.
-      const ignoreOffline = replacing || retryRequested;
+      const ignoreOffline = replacing || retryRequested || offlineRecheckDue;
       if (currentIntent.network === "offline" && !ignoreOffline) {
         yield* clearLease;
         yield* setState(offlineState(currentIntent, generation, failureCount + 1, latestFailure));
-        const applicationActivated = yield* waitForSignal;
+        const applicationActivated = yield* waitForRetrySignal(OFFLINE_RECHECK_MS);
         if (applicationActivated) {
           resetRetryLadder();
         }
+        offlineRecheckDue = true;
         continue;
       }
 
@@ -1233,6 +1246,7 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
         runAttempt(attempt, nextGeneration, latestFailure, pendingRetry, ignoreOffline),
       );
       replacing = false;
+      offlineRecheckDue = false;
       const failedProbe = yield* Ref.getAndSet(probeUnanswered, false);
       if (outcome.established) {
         generation = nextGeneration;
@@ -1299,7 +1313,11 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
           : error.reason === "approval-pending"
             ? Math.max(
                 APPROVAL_PENDING_RETRY_DELAY_MS,
-                retryDelayMs(backoffFailures - 1, yield* Random.next),
+                retryDelayMs(
+                  backoffFailures - 1,
+                  yield* Random.next,
+                  APPROVAL_PENDING_MAX_DELAY_MS,
+                ),
               )
             : retryDelayMs(backoffFailures - 1, yield* Random.next);
       pendingRetry = Option.map(attemptSpan, (previousAttempt) => ({

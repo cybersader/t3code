@@ -847,6 +847,66 @@ describe("EnvironmentSupervisor", () => {
     }).pipe(Effect.provide(TestClock.layer())),
   );
 
+  it.effect("keeps retrying a long outage and reconnects within 30 seconds of recovery", () =>
+    Effect.gen(function* () {
+      const serverUp = yield* Ref.make(true);
+      const harness = yield* makeHarness({
+        prepare: () =>
+          Ref.get(serverUp).pipe(
+            Effect.flatMap((up) =>
+              up ? Effect.succeed(PREPARED_CONNECTION) : Effect.fail(transient()),
+            ),
+          ),
+      });
+      const supervisor = yield* EnvironmentSupervisor.make(TARGET_ENTRY, {
+        initiallyDesired: true,
+      }).pipe(Effect.provide(harness.dependencies));
+
+      yield* awaitState(supervisor.state, (state) => state.phase === "connected");
+      // The server drops the socket and stays unreachable for hours.
+      yield* Ref.set(serverUp, false);
+      yield* harness.closeLatestSession();
+      yield* TestClock.adjust("3 hours");
+      const attemptsDuringOutage = yield* Ref.get(harness.prepareCount);
+      expect(attemptsDuringOutage).toBeGreaterThan(300);
+      expect((yield* SubscriptionRef.get(supervisor.state)).phase).toBe("backoff");
+
+      yield* Ref.set(serverUp, true);
+      yield* TestClock.adjust("30 seconds");
+      yield* awaitState(supervisor.state, (state) => state.phase === "connected");
+    }).pipe(Effect.provide(TestClock.layer())),
+  );
+
+  it.effect("still tries while the device keeps reporting offline", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness({ networkStatus: "offline" });
+      const supervisor = yield* EnvironmentSupervisor.make(RELAY_ENTRY, {
+        initiallyDesired: true,
+      }).pipe(Effect.provide(harness.dependencies));
+
+      yield* awaitState(supervisor.state, (state) => state.phase === "offline");
+      expect(yield* Ref.get(harness.prepareCount)).toBe(0);
+      // The report never changes, but the server is reachable.
+      yield* TestClock.adjust("30 seconds");
+      yield* awaitState(supervisor.state, (state) => state.phase === "connected");
+      expect(yield* Ref.get(harness.prepareCount)).toBe(1);
+    }).pipe(Effect.provide(TestClock.layer())),
+  );
+
+  it.effect("an explicit retry tries while the device reports offline", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness({ networkStatus: "offline" });
+      const supervisor = yield* EnvironmentSupervisor.make(RELAY_ENTRY, {
+        initiallyDesired: true,
+      }).pipe(Effect.provide(harness.dependencies));
+
+      yield* awaitState(supervisor.state, (state) => state.phase === "offline");
+      yield* supervisor.retryNow;
+      yield* awaitState(supervisor.state, (state) => state.phase === "connected");
+      expect(yield* Ref.get(harness.prepareCount)).toBe(1);
+    }).pipe(Effect.provide(TestClock.layer())),
+  );
+
   it.effect("does not report a session lost while suspended as a failed connection", () =>
     Effect.gen(function* () {
       const allowReconnect = yield* Deferred.make<void>();
