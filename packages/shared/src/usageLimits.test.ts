@@ -1768,6 +1768,108 @@ describe("sameUsageLimitCommandCoverage", () => {
   });
 });
 
+describe("restricted proxy usage presentation", () => {
+  it("counts real accounts once, omits unsupported aliases, and keeps account failures visible", () => {
+    const aliases = ["Astra", "Claude (x)", "Fable", "Opus", "Sol", "Sonnet"].map((name) =>
+      provider({
+        instanceId: ProviderInstanceId.make(name.replace(/[^a-zA-Z]/g, "")),
+        displayName: name,
+        driver: ProviderDriverKind.make("claudeAgent"),
+        usageLimits: {
+          checkedAt: "2026-09-03T11:00:00.000Z",
+          windows: [],
+          unavailable: { reason: "unsupported" },
+        },
+      }),
+    );
+    const native = provider({
+      instanceId: ProviderInstanceId.make("native-claude"),
+      displayName: "Native Claude",
+      driver: ProviderDriverKind.make("claudeAgent"),
+      usageLimits: {
+        checkedAt: "2026-09-03T11:00:00.000Z",
+        windows: [],
+        unavailable: { reason: "probeFailed" },
+      },
+    });
+    const source = {
+      id: UsageLimitSourceId.make("proxy"),
+      kind: "cliproxy" as const,
+      label: "Proxy accounts",
+      checkedAt: native.checkedAt,
+      accounts: [
+        {
+          id: "codex",
+          email: "codex@example.com",
+          driver: ProviderDriverKind.make("codex"),
+          usageLimits: { checkedAt: native.checkedAt, windows: [window] },
+        },
+        {
+          id: "claude",
+          email: "claude@example.com",
+          driver: ProviderDriverKind.make("claudeAgent"),
+          usageLimits: { checkedAt: native.checkedAt, windows: [{ ...window, usedPercent: 70 }] },
+        },
+        {
+          id: "failed",
+          email: "failed@example.com",
+          driver: ProviderDriverKind.make("claudeAgent"),
+          usageLimits: {
+            checkedAt: native.checkedAt,
+            windows: [],
+            unavailable: {
+              reason: "probeFailed" as const,
+              message: "The hub could not read this account's usage.",
+            },
+          },
+        },
+      ],
+    };
+    const presentations = new Map([
+      [
+        EnvironmentId.make("local"),
+        {
+          entry: { target: { label: "Local" } },
+          serverConfig: { providers: [...aliases, native], usageLimitSources: [source] },
+        },
+      ],
+    ]);
+    const accounts = collectLimitAccounts(presentations);
+    expect(accounts).toHaveLength(2);
+    expect(
+      collectLimitPools(accounts, now).map((pool) => [
+        pool.driver,
+        pool.accounts.length,
+        pool.windows[0]?.usedPercent,
+      ]),
+    ).toEqual([
+      ["codex", 1, 40],
+      ["claudeAgent", 1, 70],
+    ]);
+    expect(collectLimitNotices(presentations)).toEqual([
+      "Native Claude: Could not read limits.",
+      "Proxy accounts · failed@example.com: The hub could not read this account's usage.",
+    ]);
+    const failedSource = new Map([
+      [
+        EnvironmentId.make("local"),
+        {
+          entry: { target: { label: "Local" } },
+          serverConfig: {
+            providers: aliases,
+            usageLimitSources: [
+              { ...source, accounts: [], error: "The hub answered with HTTP 403." },
+            ],
+          },
+        },
+      ],
+    ]);
+    expect(collectLimitNotices(failedSource)).toEqual([
+      "Proxy accounts: The hub answered with HTTP 403.",
+    ]);
+  });
+});
+
 describe("external usage settings", () => {
   it("deduplicates destinations across accounts and environments without inventing quota pools", () => {
     const managed = provider({

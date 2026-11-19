@@ -23,6 +23,152 @@ import * as ServerSettings from "../serverSettings.ts";
 import * as UsageLimitSources from "./UsageLimitSources.ts";
 
 const encodeConfigEvent = Schema.encodeSync(ServerConfigStreamEvent);
+const decodeUsageRequest = Schema.decodeUnknownSync(
+  Schema.fromJsonString(
+    Schema.Struct({
+      auth_index: Schema.String,
+      url: Schema.String,
+      method: Schema.String,
+    }),
+  ),
+);
+
+it.effect(
+  "refreshes real proxy accounts, preserves failures, and replaces stale values on recovery",
+  () => {
+    let phase: "success" | "account-error" | "hub-error" | "recovered" = "success";
+    const calls: Array<{ phase: string; account: string; url: string }> = [];
+    return Effect.gen(function* () {
+      yield* TestClock.setTime(1788436800000);
+      const sources = yield* UsageLimitSources.make;
+      yield* sources.streamChanges.pipe(
+        Stream.filter((next) => next.length > 0),
+        Stream.runHead,
+      );
+      expect(
+        (yield* sources.current)[0]?.accounts.map((account) => [
+          account.driver,
+          account.usageLimits.windows[0]?.usedPercent,
+        ]),
+      ).toEqual([
+        ["codex", 22],
+        ["claudeAgent", 65],
+      ]);
+      phase = "account-error";
+      yield* sources.refresh;
+      const failed = (yield* sources.current)[0]!;
+      expect(failed.error).toBeUndefined();
+      expect(failed.accounts.map((account) => account.usageLimits.unavailable?.reason)).toEqual([
+        "probeFailed",
+        "probeFailed",
+      ]);
+      expect(failed.accounts.every((account) => account.usageLimits.windows.length === 0)).toBe(
+        true,
+      );
+      phase = "hub-error";
+      yield* sources.refresh;
+      expect((yield* sources.current)[0]).toMatchObject({
+        accounts: [],
+        error: "The hub answered with HTTP 503.",
+      });
+      phase = "recovered";
+      yield* TestClock.setTime(1788440400000);
+      yield* sources.refresh;
+      const recovered = (yield* sources.current)[0]!;
+      expect(recovered.error).toBeUndefined();
+      expect(
+        recovered.accounts.map((account) => [
+          account.driver,
+          account.usageLimits.windows[0]?.usedPercent,
+          account.usageLimits.unavailable,
+        ]),
+      ).toEqual([
+        ["codex", 31, undefined],
+        ["claudeAgent", 71, undefined],
+      ]);
+      expect(recovered.checkedAt).toBe("2026-09-03T13:00:00.000Z");
+      expect(
+        calls
+          .filter((call) => call.phase === "recovered")
+          .map((call) => call.url)
+          .sort(),
+      ).toEqual([
+        "https://api.anthropic.com/api/oauth/usage",
+        "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits",
+        "https://chatgpt.com/backend-api/wham/usage",
+      ]);
+    }).pipe(
+      Effect.provide([
+        ServerSettings.layerTest({
+          usageLimitSources: {
+            [UsageLimitSourceId.make("proxy")]: {
+              kind: "cliproxy",
+              url: "https://hub.test",
+              managementKey: "fixture-key",
+              enabled: true,
+            },
+          },
+        }),
+        Layer.mock(BackgroundPolicy.BackgroundPolicy)({
+          shouldRunScopeWork: () => Effect.succeed(false),
+        }),
+        Layer.succeed(SecretResolver.SecretResolver, {
+          label: (provider) => Effect.succeed(provider),
+          read: (references) => Effect.succeed(references.map(() => undefined)),
+          invalidate: () => Effect.void,
+        }),
+        Layer.succeed(
+          HttpClient.HttpClient,
+          HttpClient.make((request) =>
+            Effect.sync(() => {
+              if (phase === "hub-error")
+                return HttpClientResponse.fromWeb(request, Response.json({}, { status: 503 }));
+              if (new URL(request.url).pathname.endsWith("/auth-files"))
+                return HttpClientResponse.fromWeb(
+                  request,
+                  Response.json({
+                    files: [
+                      { id: "codex", auth_index: "codex", provider: "codex" },
+                      { id: "claude", auth_index: "claude", provider: "claude" },
+                      {
+                        id: "disabled",
+                        auth_index: "disabled",
+                        provider: "claude",
+                        disabled: true,
+                      },
+                    ],
+                  }),
+                );
+              if (request.body._tag !== "Uint8Array")
+                throw new Error("Expected fixture request body");
+              const body = decodeUsageRequest(new TextDecoder().decode(request.body.body));
+              expect(body.method).toBe("GET");
+              calls.push({ phase, account: body.auth_index, url: body.url });
+              const usage = body.url.endsWith("rate-limit-reset-credits")
+                ? { credits: [] }
+                : body.auth_index === "claude"
+                  ? { five_hour: { utilization: phase === "recovered" ? 71 : 65, resets_at: null } }
+                  : {
+                      rate_limit: {
+                        primary_window: { used_percent: phase === "recovered" ? 31 : 22 },
+                      },
+                    };
+              return HttpClientResponse.fromWeb(
+                request,
+                Response.json({
+                  status_code: phase === "account-error" ? 401 : 200,
+                  body: JSON.stringify(usage),
+                }),
+              );
+            }),
+          ),
+        ),
+        NodeCrypto.layer,
+      ]),
+      Effect.scoped,
+    );
+  },
+);
 
 it.effect("keeps malformed source URLs encodable for config subscribers", () =>
   Effect.gen(function* () {

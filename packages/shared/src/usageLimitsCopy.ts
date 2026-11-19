@@ -105,6 +105,14 @@ export function collectLimitNotices(
             }),
           ),
         );
+      } else {
+        // A hub reports each account's failure on that account, not on the source.
+        for (const account of source.accounts) {
+          const notice = limitsNotice(account.usageLimits, resolve);
+          if (!notice) continue;
+          const name = account.email ?? account.id.replace(/\.json$/i, "");
+          notices.add(`${label(environmentLabel, source.label)} · ${name}: ${notice}`);
+        }
       }
     }
   }
